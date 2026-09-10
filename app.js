@@ -22,7 +22,7 @@ document.addEventListener('DOMContentLoaded', () => {
       category: 'Work',
       priority: 'high',
       dueDate: getRelativeDateString(0), // Today
-      completed: false,
+      status: 'todo',
       createdAt: Date.now() - 3600000 * 2
     },
     {
@@ -32,7 +32,7 @@ document.addEventListener('DOMContentLoaded', () => {
       category: 'Personal',
       priority: 'medium',
       dueDate: getRelativeDateString(1), // Tomorrow
-      completed: false,
+      status: 'todo',
       createdAt: Date.now() - 3600000
     },
     {
@@ -42,7 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
       category: 'Health',
       priority: 'low',
       dueDate: getRelativeDateString(-1), // Yesterday (overdue by default for demonstration)
-      completed: false,
+      status: 'todo',
       createdAt: Date.now() - 3600000 * 5
     },
     {
@@ -52,7 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
       category: 'Work',
       priority: 'high',
       dueDate: getRelativeDateString(2), 
-      completed: true,
+      status: 'done',
       createdAt: Date.now() - 3600000 * 10
     }
   ];
@@ -68,6 +68,10 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --- DOM SELECTORS ---
+  const exportBtn = document.getElementById('export-data');
+  const importBtn = document.getElementById('import-data');
+  const importFileInput = document.getElementById('import-file-input');
+
   const themeToggle = document.getElementById('theme-toggle');
   const openAddModalBtn = document.getElementById('open-add-modal');
   const modalOverlay = document.getElementById('task-modal');
@@ -110,6 +114,18 @@ document.addEventListener('DOMContentLoaded', () => {
     loadTasks();
     setupEventListeners();
     render();
+    registerServiceWorker();
+  }
+
+  function registerServiceWorker() {
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').then(
+          (registration) => { console.log('SW registered: ', registration); },
+          (err) => { console.log('SW registration failed: ', err); }
+        );
+      });
+    }
   }
 
   // --- THEME MANAGEMENT ---
@@ -132,6 +148,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (savedData) {
       try {
         tasks = JSON.parse(savedData);
+        // Data Migration: convert old 'completed' to new 'status'
+        tasks = tasks.map(t => {
+          if (t.status === undefined) {
+            t.status = t.completed ? 'done' : 'todo';
+            delete t.completed;
+          }
+          return t;
+        });
       } catch (e) {
         console.error('Failed to parse saved tasks, loading default seed data.', e);
         tasks = [...defaultTasks];
@@ -148,8 +172,115 @@ document.addEventListener('DOMContentLoaded', () => {
     localStorage.setItem('zenith_tasks', JSON.stringify(tasks));
   }
 
+  // --- EXPORT & IMPORT ---
+  function exportTasks() {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(tasks));
+    const downloadAnchorNode = document.createElement('a');
+    downloadAnchorNode.setAttribute("href", dataStr);
+    downloadAnchorNode.setAttribute("download", "zenith_tasks.json");
+    document.body.appendChild(downloadAnchorNode); // required for firefox
+    downloadAnchorNode.click();
+    downloadAnchorNode.remove();
+    showToast("Tasks exported successfully", 'success');
+  }
+
+  function importTasks(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        const importedTasks = JSON.parse(e.target.result);
+        if (Array.isArray(importedTasks)) {
+          tasks = importedTasks;
+          saveTasks();
+          render();
+          showToast("Tasks imported successfully", 'success');
+        } else {
+          showToast("Invalid file format", 'error');
+        }
+      } catch (err) {
+        showToast("Failed to parse file", 'error');
+      }
+    };
+    reader.readAsText(file);
+    // Reset file input
+    importFileInput.value = '';
+  }
+
   // --- EVENT LISTENERS REGISTRATION ---
   function setupEventListeners() {
+    // --- POMODORO LOGIC ---
+    const pomodoroTime = document.getElementById('pomodoro-time');
+    const pomodoroStart = document.getElementById('pomodoro-start');
+    const pomodoroReset = document.getElementById('pomodoro-reset');
+    const pomodoroStatus = document.getElementById('pomodoro-status');
+    
+    let pomoInterval;
+    let pomoTimeLeft = 25 * 60;
+    let isPomoRunning = false;
+
+    function updatePomoDisplay() {
+      const m = Math.floor(pomoTimeLeft / 60).toString().padStart(2, '0');
+      const s = (pomoTimeLeft % 60).toString().padStart(2, '0');
+      if(pomodoroTime) pomodoroTime.textContent = `${m}:${s}`;
+    }
+
+    if(pomodoroStart) {
+      pomodoroStart.addEventListener('click', () => {
+        if (isPomoRunning) {
+          clearInterval(pomoInterval);
+          pomodoroStart.textContent = 'Start';
+          pomodoroStatus.textContent = 'Timer paused.';
+          isPomoRunning = false;
+        } else {
+          isPomoRunning = true;
+          pomodoroStart.textContent = 'Pause';
+          pomodoroStatus.textContent = 'Focusing...';
+          
+          pomoInterval = setInterval(() => {
+            pomoTimeLeft--;
+            updatePomoDisplay();
+            
+            if (pomoTimeLeft <= 0) {
+              clearInterval(pomoInterval);
+              isPomoRunning = false;
+              pomodoroStart.textContent = 'Start';
+              pomodoroStatus.textContent = 'Session complete! Take a break.';
+              showToast('Pomodoro session complete! 🎉', 'success');
+              // Play a sound if you like, or browser notification
+              if (Notification.permission === 'granted') {
+                new Notification('Zenith Tasks', { body: 'Pomodoro session complete! Take a break.' });
+              } else if (Notification.permission !== 'denied') {
+                Notification.requestPermission().then(permission => {
+                  if (permission === 'granted') new Notification('Zenith Tasks', { body: 'Pomodoro session complete! Take a break.' });
+                });
+              }
+              pomoTimeLeft = 25 * 60;
+              updatePomoDisplay();
+            }
+          }, 1000);
+        }
+      });
+    }
+
+    if(pomodoroReset) {
+      pomodoroReset.addEventListener('click', () => {
+        clearInterval(pomoInterval);
+        isPomoRunning = false;
+        pomoTimeLeft = 25 * 60;
+        updatePomoDisplay();
+        if(pomodoroStart) pomodoroStart.textContent = 'Start';
+        if(pomodoroStatus) pomodoroStatus.textContent = 'Ready to focus?';
+      });
+    }
+
+    // Export/Import
+    if (exportBtn) exportBtn.addEventListener('click', exportTasks);
+    if (importBtn) importBtn.addEventListener('click', () => importFileInput.click());
+    if (importFileInput) importFileInput.addEventListener('change', importTasks);
+
     // Theme toggle
     themeToggle.addEventListener('click', toggleTheme);
 
@@ -167,6 +298,33 @@ document.addEventListener('DOMContentLoaded', () => {
     // Form Submission
     taskForm.addEventListener('submit', handleFormSubmit);
 
+    // Quick Add Form
+    const quickAddForm = document.getElementById('quick-add-form');
+    const quickAddInput = document.getElementById('quick-add-input');
+    if (quickAddForm) {
+      quickAddForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const title = quickAddInput.value.trim();
+        if (title) {
+          const newTask = {
+            id: 'task_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+            title,
+            description: '',
+            category: 'General',
+            priority: 'medium',
+            dueDate: getRelativeDateString(0),
+            status: 'todo',
+            createdAt: Date.now()
+          };
+          tasks.push(newTask);
+          saveTasks();
+          render();
+          quickAddInput.value = '';
+          showToast('Task added quickly', 'success');
+        }
+      });
+    }
+
     // Live search
     searchInput.addEventListener('input', (e) => {
       filterState.search = e.target.value.trim().toLowerCase();
@@ -182,6 +340,36 @@ document.addEventListener('DOMContentLoaded', () => {
       render();
       searchInput.focus();
     });
+
+    // Voice Search
+    const voiceSearchBtn = document.getElementById('voice-search-btn');
+    if (voiceSearchBtn && ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      
+      voiceSearchBtn.addEventListener('click', () => {
+        voiceSearchBtn.classList.add('listening');
+        recognition.start();
+        showToast('Listening...', 'info');
+      });
+      
+      recognition.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        searchInput.value = transcript;
+        filterState.search = transcript.toLowerCase();
+        clearSearchBtn.style.display = 'flex';
+        render();
+        showToast(`Heard: "${transcript}"`, 'success');
+      };
+      
+      recognition.onend = () => {
+        voiceSearchBtn.classList.remove('listening');
+      };
+    } else if (voiceSearchBtn) {
+      voiceSearchBtn.style.display = 'none';
+    }
 
     // Status Tab Filtering
     statusTabs.addEventListener('click', (e) => {
@@ -234,6 +422,62 @@ document.addEventListener('DOMContentLoaded', () => {
       // Delete button click
       else if (e.target.closest('.delete-btn')) {
         deleteTask(taskId);
+      }
+    });
+
+    // Drag and drop logic
+    tasksContainer.addEventListener('dragstart', (e) => {
+      const card = e.target.closest('.task-card');
+      if (card) {
+        card.classList.add('dragging');
+        e.dataTransfer.setData('text/plain', card.dataset.id);
+        e.dataTransfer.effectAllowed = 'move';
+      }
+    });
+
+    tasksContainer.addEventListener('dragend', (e) => {
+      const card = e.target.closest('.task-card');
+      if (card) {
+        card.classList.remove('dragging');
+      }
+    });
+
+    tasksContainer.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      const dropzone = e.target.closest('.kanban-dropzone');
+      if (dropzone) {
+        dropzone.classList.add('drag-over');
+      }
+    });
+
+    tasksContainer.addEventListener('dragleave', (e) => {
+      const dropzone = e.target.closest('.kanban-dropzone');
+      if (dropzone) {
+        dropzone.classList.remove('drag-over');
+      }
+    });
+
+    tasksContainer.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const dropzone = e.target.closest('.kanban-dropzone');
+      if (dropzone) {
+        dropzone.classList.remove('drag-over');
+        const taskId = e.dataTransfer.getData('text/plain');
+        const task = tasks.find(t => t.id === taskId);
+        if (task) {
+          const newStatus = dropzone.parentElement.dataset.status;
+          task.status = newStatus;
+          saveTasks();
+          render();
+
+          if (newStatus === 'done' && window.confetti) {
+            confetti({
+              particleCount: 100,
+              spread: 70,
+              origin: { y: 0.6 }
+            });
+          }
+        }
       }
     });
 
@@ -330,7 +574,7 @@ document.addEventListener('DOMContentLoaded', () => {
         category,
         priority,
         dueDate,
-        completed: false,
+        status: 'todo',
         createdAt: Date.now()
       };
       tasks.push(newTask);
@@ -347,12 +591,19 @@ document.addEventListener('DOMContentLoaded', () => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
     
-    task.completed = !task.completed;
+    task.status = task.status === 'done' ? 'todo' : 'done';
     saveTasks();
     render();
 
-    if (task.completed) {
+    if (task.status === 'done') {
       showToast(`Task completed! 🎉`, 'success');
+      if (window.confetti) {
+        confetti({
+          particleCount: 100,
+          spread: 70,
+          origin: { y: 0.6 }
+        });
+      }
     } else {
       showToast(`Task set to active`, 'info');
     }
@@ -418,9 +669,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // 2. Completion Status Filter
     if (filterState.status === 'active') {
-      result = result.filter(t => !t.completed);
+      result = result.filter(t => t.status !== 'done');
     } else if (filterState.status === 'completed') {
-      result = result.filter(t => t.completed);
+      result = result.filter(t => t.status === 'done');
     }
 
     // 3. Category Filter
@@ -464,24 +715,39 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Create task cards in DOM
   function renderTaskList(filteredTasks) {
-    tasksContainer.innerHTML = '';
+    const colTodo = document.getElementById('col-todo');
+    const colInProgress = document.getElementById('col-in-progress');
+    const colDone = document.getElementById('col-done');
+    
+    if (colTodo) colTodo.innerHTML = '';
+    if (colInProgress) colInProgress.innerHTML = '';
+    if (colDone) colDone.innerHTML = '';
+
+    // Update Kanban Counts
+    const headerTodo = colTodo?.parentElement.querySelector('.kanban-count');
+    const headerInProgress = colInProgress?.parentElement.querySelector('.kanban-count');
+    const headerDone = colDone?.parentElement.querySelector('.kanban-count');
+    
+    let countTodo = 0;
+    let countInProgress = 0;
+    let countDone = 0;
 
     if (filteredTasks.length === 0) {
-      emptyState.style.display = 'flex';
-      tasksContainer.style.display = 'none';
-      return;
+      // Don't hide the Kanban board, just let it be empty so users can still use Quick Add
+      emptyState.style.display = 'none';
+      tasksContainer.style.display = 'grid'; // .kanban-board is a grid
+    } else {
+      emptyState.style.display = 'none';
+      tasksContainer.style.display = 'grid'; // .kanban-board is a grid
     }
 
-    emptyState.style.display = 'none';
-    tasksContainer.style.display = 'grid';
-
-    const fragment = document.createDocumentFragment();
     const todayStr = getRelativeDateString(0);
 
     filteredTasks.forEach(task => {
       const card = document.createElement('div');
-      card.className = `task-card${task.completed ? ' completed' : ''}`;
+      card.className = `task-card${task.status === 'done' ? ' completed' : ''}`;
       card.dataset.id = task.id;
+      card.draggable = true;
 
       // Determine Due Date relative state (e.g. overdue, due today)
       let dueClass = '';
@@ -490,7 +756,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (task.dueDate) {
         dueText = formatDisplayDate(task.dueDate);
         
-        if (!task.completed) {
+        if (task.status !== 'done') {
           if (task.dueDate < todayStr) {
             dueClass = ' due-overdue';
             dueText = `Overdue: ${dueText}`;
@@ -514,7 +780,7 @@ document.addEventListener('DOMContentLoaded', () => {
           <div class="task-header-row">
             <h4 class="task-title">${escapeHTML(task.title)}</h4>
           </div>
-          ${task.description ? `<p class="task-desc">${escapeHTML(task.description)}</p>` : ''}
+          ${task.description ? `<div class="task-desc markdown-body">${window.marked ? marked.parse(task.description) : escapeHTML(task.description)}</div>` : ''}
           
           <div class="task-meta-row">
             <span class="meta-tag priority-tag priority-${task.priority}">
@@ -543,10 +809,21 @@ document.addEventListener('DOMContentLoaded', () => {
         </div>
       `;
 
-      fragment.appendChild(card);
+      if (task.status === 'in-progress' && colInProgress) {
+        colInProgress.appendChild(card);
+        countInProgress++;
+      } else if (task.status === 'done' && colDone) {
+        colDone.appendChild(card);
+        countDone++;
+      } else if (colTodo) {
+        colTodo.appendChild(card);
+        countTodo++;
+      }
     });
 
-    tasksContainer.appendChild(fragment);
+    if (headerTodo) headerTodo.textContent = countTodo;
+    if (headerInProgress) headerInProgress.textContent = countInProgress;
+    if (headerDone) headerDone.textContent = countDone;
   }
 
   // Populate dynamic category counts in Sidebar
@@ -586,7 +863,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Update visual graphs & metadata numbers
   function updateStatistics() {
     const total = tasks.length;
-    const completed = tasks.filter(t => t.completed).length;
+    const completed = tasks.filter(t => t.status === 'done').length;
     const active = total - completed;
 
     // 1. Text elements
